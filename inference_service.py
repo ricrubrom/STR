@@ -1,16 +1,15 @@
+from lib.preprocessing import preprocess_data
 from typing import List, Optional
 import os
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
+from joblib import load
 from pydantic import BaseModel, Field
-from typing import Optional
 from tensorflow.keras.models import load_model
 import sys
 FUENTES_DIR = "/lib"
 sys.path.append(FUENTES_DIR)
-from lib.preprocessing import preprocess_data
-from sklearn.preprocessing import StandardScaler
 
 
 class PredictRequest(BaseModel):
@@ -18,7 +17,8 @@ class PredictRequest(BaseModel):
     instances: Optional[List[List[float]]] = None
 
     # Opción B: enviar los campos individuales para un solo registro (todos opcionales)
-    date: Optional[str] = Field(None, description="Timestamp ISO8601, e.g., '2025-03-10T03:00Z'")
+    date: Optional[str] = Field(
+        None, description="Timestamp ISO8601, e.g., '2025-03-10T03:00Z'")
     temperature: Optional[float] = None
     humidity: Optional[float] = None
     rain: Optional[float] = None
@@ -27,11 +27,13 @@ class PredictRequest(BaseModel):
     wind_speed: Optional[float] = None
     wind_direction: Optional[float] = None
     clouds: Optional[float] = None
-    sunrise: Optional[int] = Field(None, description="Hora de amanecer en UNIX timestamp (UTC)")
-    sunset: Optional[int] = Field(None, description="Hora de atardecer en UNIX timestamp (UTC)")
+    sunrise: Optional[int] = Field(
+        None, description="Hora de amanecer en UNIX timestamp (UTC)")
+    sunset: Optional[int] = Field(
+        None, description="Hora de atardecer en UNIX timestamp (UTC)")
     working_day: Optional[bool] = None
     holiday: Optional[bool] = None
-    
+
 # Ejemplo de payload:
 # {
 #     "date": "2025-03-10T03:00Z",
@@ -49,12 +51,14 @@ class PredictRequest(BaseModel):
 #     "holiday": false
 # }
 
+
 app = FastAPI(title="Energy Consumption Inference")
+
 
 def find_and_load_model(models_dir: str = "models"):
     # Buscar variantes de guardado comunes
     candidates = [
-        os.path.join(models_dir, "energy_consumption_model.keras"),    ]
+        os.path.join(models_dir, "energy_consumption_model.keras"),]
     for c in candidates:
         if os.path.exists(c):
             try:
@@ -63,14 +67,28 @@ def find_and_load_model(models_dir: str = "models"):
             except Exception as e:
                 # Intentar la siguiente opción
                 print(f"No se pudo cargar {c}: {e}")
-    raise FileNotFoundError("No se encontró un modelo válido en 'models/'. Asegurate de guardar el modelo allí.")
+    raise FileNotFoundError(
+        "No se encontró un modelo válido en 'models/'. Asegurate de guardar el modelo allí.")
+
 
 # Cargar modelo al iniciar la app (mejor para rendimiento)
 MODEL = None
+X_SCALER = None
+Y_SCALER = None
+SCALER_DIR = os.getenv("SCALER_DIR", "models")
+X_SCALER_PATH = os.path.join(SCALER_DIR, "x_scaler.joblib")
+Y_SCALER_PATH = os.path.join(SCALER_DIR, "y_scaler.joblib")
+
+
+def _load_scaler(path: str):
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+    return load(path)
+
 
 @app.on_event("startup")
 def startup_event():
-    global MODEL
+    global MODEL, X_SCALER, Y_SCALER
     try:
         MODEL = find_and_load_model()
         print("Modelo cargado correctamente.")
@@ -78,26 +96,41 @@ def startup_event():
         MODEL = None
         print(str(e))
 
+    try:
+        X_SCALER = _load_scaler(X_SCALER_PATH)
+        Y_SCALER = _load_scaler(Y_SCALER_PATH)
+        print("Escaladores cargados correctamente.")
+    except FileNotFoundError as e:
+        X_SCALER = None
+        Y_SCALER = None
+        print(f"No se encontraron los escaladores requeridos: {e}")
+
 
 @app.get("/health")
 def health():
     return {
         "model_loaded": MODEL is not None,
+        "scalers_loaded": X_SCALER is not None and Y_SCALER is not None,
     }
 
 
 @app.post("/predict")
 def predict(req: PredictRequest):
     if MODEL is None:
-        raise HTTPException(status_code=500, detail="Modelo no cargado en el servidor. Guarda el modelo en models/ y reiniciá el servicio.")
+        raise HTTPException(
+            status_code=500, detail="Modelo no cargado en el servidor. Guarda el modelo en models/ y reiniciá el servicio.")
+    if X_SCALER is None or Y_SCALER is None:
+        raise HTTPException(
+            status_code=500, detail="Escaladores no disponibles. Reentrená el modelo para generar x_scaler.joblib y y_scaler.joblib en models/.")
     # Comportamiento especial: si el cliente manda 'generation', devolverlo literal y terminar.
-    
+
     try:
         if req.instances is not None:
             # Convertir a numpy array y validar forma
             X = np.array(req.instances, dtype=float)
             if X.ndim != 2:
-                raise HTTPException(status_code=400, detail="'instances' debe ser una lista de vectores (2D). Ej: [[f1,f2,...],[...]]")
+                raise HTTPException(
+                    status_code=400, detail="'instances' debe ser una lista de vectores (2D). Ej: [[f1,f2,...],[...]]")
 
             # Asumimos que el cliente ya envió features en el orden correcto y ya preparados.
             X_np = X
@@ -121,9 +154,11 @@ def predict(req: PredictRequest):
                 "holiday",
             ]
             # Validar presencia de campos
-            missing = [f for f in required_fields if getattr(req, f, None) is None]
+            missing = [f for f in required_fields if getattr(
+                req, f, None) is None]
             if missing:
-                raise HTTPException(status_code=400, detail=f"Faltan campos para construir la instancia: {missing}. O enviá 'instances'.")
+                raise HTTPException(
+                    status_code=400, detail=f"Faltan campos para construir la instancia: {missing}. O enviá 'instances'.")
 
             # Construir DataFrame con una sola fila
             row = {
@@ -149,16 +184,17 @@ def predict(req: PredictRequest):
             # Convertir a numpy array X
             X_np = df_proc.values
 
-        # Escalado y predicción (X_np es numpy.ndarray)
-        x_scaler = StandardScaler()
-        X_scaled = x_scaler.fit_transform(X_np)
-        preds = MODEL.predict(X_scaled)
+        X_scaled = X_SCALER.transform(X_np)
+        preds_scaled = MODEL.predict(X_scaled)
+        preds = Y_SCALER.inverse_transform(
+            np.asarray(preds_scaled).reshape(-1, 1))
 
     except HTTPException:
         # Re-lanzar errores de validación HTTP tal cual
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error durante la predicción: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Error durante la predicción: {e}")
 
     # Aplanar y devolver
     preds_list = np.array(preds).reshape(-1).tolist()
